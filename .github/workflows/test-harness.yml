@@ -6,13 +6,15 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   # Test 1: Happy-path invocation of the reusable workflow
   test-golden-path-happy:
     name: "Test: Valid Consumer Invocation"
+    permissions:
+      contents: read
+      id-token: write # Required because the called workflow's deploy-cdk job declares id-token: write
     uses: ./.github/workflows/golden-path-deploy.yml
     with:
       service-name: "parcel-tracking-api"
@@ -25,6 +27,8 @@ jobs:
     name: "Test: Verify Workflow Outputs"
     needs: [test-golden-path-happy]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
       RESOLVED_TAGS: ${{ needs.test-golden-path-happy.outputs.resolved-tags }}
     steps:
@@ -40,6 +44,8 @@ jobs:
   test-injection-rejection:
     name: "Test: Reject Malicious Input Injection"
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
