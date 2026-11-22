@@ -1,0 +1,93 @@
+name: "POL Golden Path - CDK Service Pipeline"
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        type: string
+        required: true
+      environment:
+        type: string
+        required: true
+      cost-centre:
+        type: string
+        required: true
+      aws-role-arn:
+        type: string
+        required: false
+        default: ""
+      dry-run:
+        type: boolean
+        required: false
+        default: true
+    outputs:
+      resolved-tags:
+        description: "Final AWS tags applied to the deployment"
+        value: ${{ jobs.prepare.outputs.aws-tags }}
+
+# SECURITY: Zero permissions by default at workflow level
+permissions: {}
+
+jobs:
+  prepare:
+    name: "1. Governance & Tag Validation"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      aws-tags: ${{ steps.meta.outputs.aws-tags-json }}
+      dd-tags: ${{ steps.meta.outputs.dd-tags }}
+    steps:
+      # Pinned to exact commit SHA for actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate & Generate Compliance Tags
+        id: meta
+        uses: ./.github/actions/validate-and-tag
+        with:
+          service-name: ${{ inputs.service-name }}
+          environment: ${{ inputs.environment }}
+          cost-centre: ${{ inputs.cost-centre }}
+
+  deploy-cdk:
+    name: "2. AWS CDK Synth & Deploy (${{ inputs.environment }})"
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    # OIDC token permission granted ONLY to the deployment job
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SERVICE_NAME: ${{ inputs.service-name }}
+      TARGET_ENV: ${{ inputs.environment }}
+      AWS_TAGS_JSON: ${{ needs.prepare.outputs.aws-tags }}
+      DD_TAGS: ${{ needs.prepare.outputs.dd-tags }}
+      DRY_RUN: ${{ inputs.dry-run }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Real AWS OIDC authentication (skipped when dry-run is true)
+      - name: Configure AWS Credentials via OIDC
+        if: ${{ !inputs.dry-run }}
+        # Pinned to exact commit SHA for aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: eu-west-2 # London region (standard for UK public sector)
+
+      - name: Execute CDK Synth / Deploy with Enforced Tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Deploying $SERVICE_NAME to $TARGET_ENV (eu-west-2)"
+          echo "Enforced AWS Tags: $AWS_TAGS_JSON"
+          echo "Datadog Unified Tags: $DD_TAGS"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "::notice::Dry-run enabled — simulating 'npx cdk deploy --require-approval never'"
+          else
+            # Pass tags dynamically into CDK context
+            npx cdk deploy --require-approval never -c tags="$AWS_TAGS_JSON"
+          fi

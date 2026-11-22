@@ -1,0 +1,73 @@
+name: "POL Golden Path - Validate Metadata & Generate Tags"
+description: "Validates service metadata safely and outputs standardized AWS/Datadog tags"
+
+inputs:
+  service-name:
+    description: "Alphanumeric service identifier (e.g., branch-locator-api)"
+    required: true
+  environment:
+    description: "Target deployment environment (dev | staging | prod)"
+    required: true
+  cost-centre:
+    description: "POL FinOps cost centre code (e.g., CC-4021)"
+    required: true
+
+outputs:
+  aws-tags-json:
+    description: "JSON string of mandatory AWS tags for CDK"
+    value: ${{ steps.build-tags.outputs.aws_tags_json }}
+  dd-tags:
+    description: "Comma-separated Datadog unified service tags"
+    value: ${{ steps.build-tags.outputs.dd_tags }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Validate inputs and generate compliant tags
+      id: build-tags
+      shell: bash
+      # SECURITY: Always pass untrusted inputs via env vars, NEVER directly in 'run:'
+      env:
+        INPUT_SERVICE: ${{ inputs.service-name }}
+        INPUT_ENV: ${{ inputs.environment }}
+        INPUT_COST_CENTRE: ${{ inputs.cost-centre }}
+        GIT_SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+
+        # 1. Strict allow-list validation to prevent injection & misconfiguration
+        if [[ ! "$INPUT_SERVICE" =~ ^[a-z0-9-]{3,40}$ ]]; then
+          echo "::error::Invalid service-name '$INPUT_SERVICE'. Must be 3-40 lowercase alphanumeric/hyphen chars."
+          exit 1
+        fi
+
+        if [[ ! "$INPUT_ENV" =~ ^(dev|staging|prod)$ ]]; then
+          echo "::error::Invalid environment '$INPUT_ENV'. Allowed: dev, staging, prod."
+          exit 1
+        fi
+
+        if [[ ! "$INPUT_COST_CENTRE" =~ ^CC-[0-9]{4}$ ]]; then
+          echo "::error::Invalid cost-centre '$INPUT_COST_CENTRE'. Expected format: CC-1234."
+          exit 1
+        fi
+
+        # 2. Construct deterministic JSON tags for AWS CDK & comma-separated tags for Datadog
+        AWS_TAGS=$(jq -nc \
+          --arg svc "$INPUT_SERVICE" \
+          --arg env "$INPUT_ENV" \
+          --arg cc "$INPUT_COST_CENTRE" \
+          --arg sha "$GIT_SHA" \
+          '{
+            "pol:service": $svc,
+            "pol:environment": $env,
+            "pol:cost-centre": $cc,
+            "pol:managed-by": "aws-cdk",
+            "pol:commit-sha": $sha
+          }')
+
+        DD_TAGS="service:${INPUT_SERVICE},env:${INPUT_ENV},cost_centre:${INPUT_COST_CENTRE},version:${GIT_SHA:0:7}"
+
+        # 3. Write safely to GITHUB_OUTPUT
+        echo "aws_tags_json=${AWS_TAGS}" >> "$GITHUB_OUTPUT"
+        echo "dd_tags=${DD_TAGS}" >> "$GITHUB_OUTPUT"
+        echo "::notice::Generated compliant tags for ${INPUT_SERVICE} (${INPUT_ENV})"
